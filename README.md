@@ -22,24 +22,25 @@ go install github.com/dimahum/bookstack-sync/cmd/bookstack-sync@latest
 
 ```
 bookstack-sync \
-  -url         https://bookstack.example.com \
-  -token-id    <API token ID> \
-  -token-secret <API token secret> \
-  -dir         ./docs \
-  -shelf       "Engineering" \
-  -exclude     "AGENTS.md,drafts"
+  --url          https://bookstack.example.com \
+  --token-id     <API token ID> \
+  --token-secret <API token secret> \
+  --dir          ./docs \
+  --shelf        "Engineering" \
+  --exclude      AGENTS.md \
+  --exclude      drafts
 ```
 
 ### Flags
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `-url` | ✓ | BookStack base URL |
-| `-token-id` | ✓ | BookStack API token ID |
-| `-token-secret` | ✓ | BookStack API token secret |
-| `-dir` | | Local directory to sync (default: `.`) |
-| `-shelf` | | Shelf name to add the book to |
-| `-exclude` | | Comma-separated list of file/directory names to skip |
+| `--url` | ✓ | BookStack base URL |
+| `--token-id` | ✓ | BookStack API token ID |
+| `--token-secret` | ✓ | BookStack API token secret |
+| `--dir` | | Local directory to sync (default: `.`) |
+| `--shelf` | | Shelf name to add the book to |
+| `--exclude` | | File/directory name to skip (repeatable) |
 
 ### Obtaining API credentials
 

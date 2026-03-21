@@ -1,41 +1,31 @@
 package main
 
 import (
-	"flag"
 	"log"
-	"strings"
+	"os"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/dimahum/bookstack-sync/internal/syncer"
 )
 
 func main() {
-	url := flag.String("url", "", "BookStack base URL (e.g. https://bookstack.example.com)")
-	tokenID := flag.String("token-id", "", "BookStack API token ID")
-	tokenSecret := flag.String("token-secret", "", "BookStack API token secret")
-	shelf := flag.String("shelf", "", "Shelf name to add the book to (optional)")
-	dir := flag.String("dir", ".", "Local directory to sync")
-	excludeStr := flag.String("exclude", "", "Comma-separated list of file/directory names to ignore (e.g. AGENTS.md,drafts)")
+	app := kingpin.New("bookstack-sync", "Sync a local Markdown directory to BookStack.")
+	app.HelpFlag.Short('h')
 
-	flag.Parse()
+	url := app.Flag("url", "BookStack base URL (e.g. https://bookstack.example.com)").
+		Required().String()
+	tokenID := app.Flag("token-id", "BookStack API token ID").
+		Required().String()
+	tokenSecret := app.Flag("token-secret", "BookStack API token secret").
+		Required().String()
+	dir := app.Flag("dir", "Local directory to sync").
+		Default(".").String()
+	shelf := app.Flag("shelf", "Shelf name to add the book to (optional)").
+		String()
+	excludes := app.Flag("exclude", "File or directory name to ignore (may be repeated, e.g. --exclude AGENTS.md --exclude drafts)").
+		Strings()
 
-	if *url == "" {
-		log.Fatal("flag -url is required")
-	}
-	if *tokenID == "" {
-		log.Fatal("flag -token-id is required")
-	}
-	if *tokenSecret == "" {
-		log.Fatal("flag -token-secret is required")
-	}
-
-	var excludes []string
-	if *excludeStr != "" {
-		for _, e := range strings.Split(*excludeStr, ",") {
-			if trimmed := strings.TrimSpace(e); trimmed != "" {
-				excludes = append(excludes, trimmed)
-			}
-		}
-	}
+	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	cfg := syncer.Config{
 		URL:         *url,
@@ -43,7 +33,7 @@ func main() {
 		TokenSecret: *tokenSecret,
 		ShelfName:   *shelf,
 		Dir:         *dir,
-		Excludes:    excludes,
+		Excludes:    *excludes,
 	}
 
 	if err := syncer.Run(cfg); err != nil {
