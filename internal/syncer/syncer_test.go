@@ -1,8 +1,12 @@
 package syncer
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -95,3 +99,128 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("writeFile(%q): %v", path, err)
 	}
 }
+
+func TestBuildExcludeSet_empty(t *testing.T) {
+	set := buildExcludeSet(nil)
+	if len(set) != 0 {
+		t.Errorf("expected empty set, got %v", set)
+	}
+}
+
+func TestListMdFiles_emptyDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := listMdFiles(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no files, got %v", got)
+	}
+}
+
+func TestListMdFiles_excludesApplied(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "keep.md"), "# keep")
+	writeFile(t, filepath.Join(dir, "skip.md"), "# skip")
+
+	excludes := buildExcludeSet([]string{"skip.md"})
+	got, err := listMdFiles(dir, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 file, got %d: %v", len(got), got)
+	}
+	if filepath.Base(got[0]) != "keep.md" {
+		t.Errorf("unexpected file: %s", got[0])
+	}
+}
+
+// newAttachmentServer starts an httptest server that simulates the
+// BookStack POST /api/attachments endpoint and returns the given attachment ID.
+func newAttachmentServer(t *testing.T, statusCode, id int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("ParseMultipartForm: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		if statusCode < 400 {
+			if err := json.NewEncoder(w).Encode(attachmentResponse{ID: id}); err != nil {
+				t.Errorf("encoding response: %v", err)
+			}
+		}
+	}))
+}
+
+func TestUploadFileAttachment_success(t *testing.T) {
+	ts := newAttachmentServer(t, http.StatusOK, 42)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "image.png")
+	writeFile(t, imgPath, "fake png bytes")
+
+	cfg := Config{URL: ts.URL, TokenID: "tid", TokenSecret: "tsecret"}
+	got, err := uploadFileAttachment(cfg, imgPath, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ts.URL + "/attachments/42"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUploadFileAttachment_serverError(t *testing.T) {
+	ts := newAttachmentServer(t, http.StatusInternalServerError, 0)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "image.png")
+	writeFile(t, imgPath, "fake png bytes")
+
+	cfg := Config{URL: ts.URL, TokenID: "tid", TokenSecret: "tsecret"}
+	_, err := uploadFileAttachment(cfg, imgPath, 7)
+	if err == nil {
+		t.Error("expected error for HTTP 500, got nil")
+	}
+}
+
+func TestUploadFileAttachment_missingFile(t *testing.T) {
+	cfg := Config{URL: "http://localhost", TokenID: "tid", TokenSecret: "tsecret"}
+	_, err := uploadFileAttachment(cfg, "/nonexistent/path/image.png", 1)
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestProcessImages_localImage(t *testing.T) {
+	ts := newAttachmentServer(t, http.StatusOK, 99)
+	defer ts.Close()
+
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "photo.png")
+	writeFile(t, imgPath, "fake png bytes")
+	mdPath := filepath.Join(dir, "page.md")
+
+	cfg := Config{URL: ts.URL, TokenID: "tid", TokenSecret: "tsecret"}
+	md := "![a photo](./photo.png)"
+	result, err := processImages(cfg, md, mdPath, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := ts.URL + "/attachments/99"
+	if result == md {
+		t.Error("expected markdown to be modified, but it was unchanged")
+	}
+	if !strings.Contains(result, want) {
+		t.Errorf("expected result to contain %q\ngot: %s", want, result)
+	}
+}
+
