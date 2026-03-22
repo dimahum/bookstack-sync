@@ -46,6 +46,11 @@ bookstack-sync \
 
 In your BookStack instance go to **Profile → API Tokens** and create a new token.
 
+## Documentation
+
+- [Full usage guide](docs/usage.md) – installation, all flags, examples, and Docker usage
+- [GitLab CI/CD pipeline](docs/gitlab-pipeline.md) – how to use the Docker image in a GitLab pipeline
+
 ## Project layout
 
 ```
