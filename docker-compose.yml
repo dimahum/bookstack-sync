@@ -1,0 +1,37 @@
+services:
+  db:
+    image: mariadb:10.11
+    environment:
+      MYSQL_ROOT_PASSWORD: rootsecret
+      MYSQL_DATABASE: bookstack
+      MYSQL_USER: bookstack
+      MYSQL_PASSWORD: booksecret
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -prootsecret"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: lscr.io/linuxserver/bookstack:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: Etc/UTC
+      APP_URL: http://localhost:8080
+      APP_KEY: ${APP_KEY}
+      DB_HOST: db
+      DB_DATABASE: bookstack
+      DB_USERNAME: bookstack
+      DB_PASSWORD: booksecret
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/login || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
