@@ -133,11 +133,12 @@ Mount your local docs directory into the container:
 docker run --rm \
   -v "$(pwd)/docs:/docs" \
   ghcr.io/dimahum/bookstack-sync:latest \
-    --url          https://bookstack.example.com \
-    --token-id     MY_TOKEN_ID \
-    --token-secret MY_TOKEN_SECRET \
-    --dir          /docs \
-    --shelf        "Engineering"
+    bookstack-sync \
+      --url          https://bookstack.example.com \
+      --token-id     MY_TOKEN_ID \
+      --token-secret MY_TOKEN_SECRET \
+      --dir          /docs \
+      --shelf        "Engineering"
 ```
 
 Pass credentials as environment variables to avoid them appearing in shell history:
@@ -149,10 +150,11 @@ docker run --rm \
   -e BOOKSTACK_TOKEN_SECRET \
   -v "$(pwd)/docs:/docs" \
   ghcr.io/dimahum/bookstack-sync:latest \
-    --url          "$BOOKSTACK_URL" \
-    --token-id     "$BOOKSTACK_TOKEN_ID" \
-    --token-secret "$BOOKSTACK_TOKEN_SECRET" \
-    --dir          /docs
+    bookstack-sync \
+      --url          "$BOOKSTACK_URL" \
+      --token-id     "$BOOKSTACK_TOKEN_ID" \
+      --token-secret "$BOOKSTACK_TOKEN_SECRET" \
+      --dir          /docs
 ```
 
 ---

@@ -15,5 +15,3 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /build/bookstack-sync /usr/local/bin/bookstack-sync
-
-ENTRYPOINT ["/usr/local/bin/bookstack-sync"]
