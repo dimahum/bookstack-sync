@@ -59,19 +59,50 @@ func Run(cfg Config) error {
 		}
 	}
 
-	// Create the book.
-	book, err := client.CreateBook(&bookstack.CreateBookRequest{Name: bookName})
+	// Find or create the book.
+	existingBookID, err := findBookByName(client, bookName)
 	if err != nil {
-		return fmt.Errorf("creating book %q: %w", bookName, err)
+		return fmt.Errorf("finding book %q: %w", bookName, err)
 	}
-	log.Printf("Created book %q (ID=%d)", book.Name, book.ID)
+	var book *bookstack.BookDetail
+	if existingBookID != 0 {
+		book, err = client.UpdateBook(existingBookID, &bookstack.UpdateBookRequest{Name: bookName})
+		if err != nil {
+			return fmt.Errorf("updating book %q: %w", bookName, err)
+		}
+		log.Printf("Updated book %q (ID=%d)", book.Name, book.ID)
+	} else {
+		book, err = client.CreateBook(&bookstack.CreateBookRequest{Name: bookName})
+		if err != nil {
+			return fmt.Errorf("creating book %q: %w", bookName, err)
+		}
+		log.Printf("Created book %q (ID=%d)", book.Name, book.ID)
+	}
 
-	// Add the new book to the shelf.
+	// Add the book to the shelf (no-op if already present).
 	if shelfID > 0 {
 		if err := addBookToShelf(client, shelfID, book.ID); err != nil {
 			return fmt.Errorf("adding book to shelf: %w", err)
 		}
 		log.Printf("Added book to shelf ID=%d", shelfID)
+	}
+
+	// Fetch full book detail to learn about existing chapters and pages.
+	bookDetail, err := client.GetBook(book.ID)
+	if err != nil {
+		return fmt.Errorf("reading book %q: %w", bookName, err)
+	}
+
+	// Build maps of existing chapters and book-level pages from the current book contents.
+	existingChapters := make(map[string]int) // chapter name → chapter ID
+	existingBookPages := make(map[string]int) // page name → page ID
+	for _, c := range bookDetail.Contents {
+		switch c.Type {
+		case "chapter":
+			existingChapters[c.Name] = c.ID
+		case "page":
+			existingBookPages[c.Name] = c.ID
+		}
 	}
 
 	excludeSet := buildExcludeSet(cfg.Excludes)
@@ -80,6 +111,11 @@ func Run(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("reading directory %q: %w", absDir, err)
 	}
+
+	// processedChapters tracks which chapter names we visited this run.
+	processedChapters := make(map[string]bool)
+	// syncedBookPages tracks which book-level page names we visited this run.
+	syncedBookPages := make(map[string]bool)
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -98,28 +134,109 @@ func Run(cfg Config) error {
 				continue
 			}
 
-			chapter, err := client.CreateChapter(&bookstack.CreateChapterRequest{
-				BookID: book.ID,
-				Name:   name,
-			})
-			if err != nil {
-				return fmt.Errorf("creating chapter %q: %w", name, err)
+			processedChapters[name] = true
+
+			// Find or create the chapter.
+			var chapter *bookstack.ChapterDetail
+			if chapterID, exists := existingChapters[name]; exists {
+				chapter, err = client.UpdateChapter(chapterID, &bookstack.UpdateChapterRequest{
+					BookID: book.ID,
+					Name:   name,
+				})
+				if err != nil {
+					return fmt.Errorf("updating chapter %q: %w", name, err)
+				}
+				log.Printf("  Updated chapter %q (ID=%d)", chapter.Name, chapter.ID)
+			} else {
+				chapter, err = client.CreateChapter(&bookstack.CreateChapterRequest{
+					BookID: book.ID,
+					Name:   name,
+				})
+				if err != nil {
+					return fmt.Errorf("creating chapter %q: %w", name, err)
+				}
+				log.Printf("  Created chapter %q (ID=%d)", chapter.Name, chapter.ID)
 			}
-			log.Printf("  Created chapter %q (ID=%d)", chapter.Name, chapter.ID)
+
+			// Build a map of pages that already exist in this chapter.
+			existingChapterPages := make(map[string]int) // page name → page ID
+			for _, p := range chapter.Pages {
+				existingChapterPages[p.Name] = p.ID
+			}
+
+			// syncedChapterPages tracks page names synced from local .md files.
+			syncedChapterPages := make(map[string]bool)
 
 			for _, mdPath := range mdFiles {
-				if err := syncPage(client, cfg, mdPath, book.ID, chapter.ID); err != nil {
+				pageName := strings.TrimSuffix(filepath.Base(mdPath), ".md")
+				syncedChapterPages[pageName] = true
+				existingPageID := existingChapterPages[pageName]
+				if err := syncPage(client, cfg, mdPath, book.ID, chapter.ID, existingPageID); err != nil {
 					return err
 				}
 			}
+
+			// Warn about pages in this chapter that have no matching .md file.
+			for pageName := range existingChapterPages {
+				if !syncedChapterPages[pageName] {
+					log.Printf("WARNING: page %q in chapter %q exists in BookStack but not in the local repo; consider removing it", pageName, name)
+				}
+			}
 		} else if strings.HasSuffix(name, ".md") {
-			if err := syncPage(client, cfg, fullPath, book.ID, 0); err != nil {
+			pageName := strings.TrimSuffix(name, ".md")
+			syncedBookPages[pageName] = true
+			existingPageID := existingBookPages[pageName]
+			if err := syncPage(client, cfg, fullPath, book.ID, 0, existingPageID); err != nil {
 				return err
 			}
 		}
 	}
 
+	// Warn about book-level pages that have no matching .md file in the repo root.
+	for pageName := range existingBookPages {
+		if !syncedBookPages[pageName] {
+			log.Printf("WARNING: page %q in book %q exists in BookStack but not in the local repo; consider removing it", pageName, bookName)
+		}
+	}
+
+	// Warn about pages in existing BookStack chapters that have no corresponding local directory.
+	for chapterName, chapterID := range existingChapters {
+		if processedChapters[chapterName] {
+			continue
+		}
+		detail, err := client.GetChapter(chapterID)
+		if err != nil {
+			log.Printf("WARNING: could not read chapter %q (ID=%d): %v", chapterName, chapterID, err)
+			continue
+		}
+		for _, p := range detail.Pages {
+			log.Printf("WARNING: page %q in chapter %q exists in BookStack but not in the local repo; consider removing it", p.Name, chapterName)
+		}
+	}
+
 	return nil
+}
+
+// findBookByName returns the ID of the first book with the given name, or 0
+// if none is found.
+func findBookByName(client *bookstack.Client, name string) (int, error) {
+	opts := &bookstack.ListOptions{Count: 500, Filter: map[string]string{"name": name}}
+	for {
+		resp, err := client.ListBooks(opts)
+		if err != nil {
+			return 0, err
+		}
+		for _, b := range resp.Data {
+			if b.Name == name {
+				return b.ID, nil
+			}
+		}
+		if opts.Offset+len(resp.Data) >= resp.Total {
+			break
+		}
+		opts.Offset += len(resp.Data)
+	}
+	return 0, nil
 }
 
 // findShelfByName returns the ID of the first shelf with the given name, or 0
@@ -144,7 +261,8 @@ func findShelfByName(client *bookstack.Client, name string) (int, error) {
 	return 0, nil
 }
 
-// addBookToShelf appends a book ID to an existing shelf.
+// addBookToShelf appends a book ID to an existing shelf, unless it is already
+// present.
 func addBookToShelf(client *bookstack.Client, shelfID, bookID int) error {
 	shelf, err := client.GetShelf(shelfID)
 	if err != nil {
@@ -152,6 +270,9 @@ func addBookToShelf(client *bookstack.Client, shelfID, bookID int) error {
 	}
 	ids := make([]int, 0, len(shelf.Books)+1)
 	for _, b := range shelf.Books {
+		if b.ID == bookID {
+			return nil // already on the shelf
+		}
 		ids = append(ids, b.ID)
 	}
 	ids = append(ids, bookID)
@@ -190,10 +311,11 @@ func listMdFiles(dir string, excludeSet map[string]bool) ([]string, error) {
 	return files, nil
 }
 
-// syncPage creates a BookStack page from a local Markdown file.
-// If chapterID > 0 the page is created inside that chapter; otherwise it
-// belongs directly to the book.
-func syncPage(client *bookstack.Client, cfg Config, mdPath string, bookID, chapterID int) error {
+// syncPage creates or updates a BookStack page from a local Markdown file.
+// If existingPageID > 0 the page is updated; otherwise a new page is created.
+// If chapterID > 0 the page belongs to that chapter; otherwise it belongs
+// directly to the book.
+func syncPage(client *bookstack.Client, cfg Config, mdPath string, bookID, chapterID, existingPageID int) error {
 	raw, err := os.ReadFile(mdPath)
 	if err != nil {
 		return fmt.Errorf("reading %q: %w", mdPath, err)
@@ -201,22 +323,34 @@ func syncPage(client *bookstack.Client, cfg Config, mdPath string, bookID, chapt
 
 	pageName := strings.TrimSuffix(filepath.Base(mdPath), ".md")
 
-	// Create the page with the raw content first so we have a page ID.
-	req := &bookstack.CreatePageRequest{
-		Name:     pageName,
-		Markdown: string(raw),
-	}
-	if chapterID > 0 {
-		req.ChapterID = chapterID
+	var page *bookstack.PageDetail
+	if existingPageID != 0 {
+		// Update the existing page.
+		page, err = client.UpdatePage(existingPageID, &bookstack.UpdatePageRequest{
+			Name:     pageName,
+			Markdown: string(raw),
+		})
+		if err != nil {
+			return fmt.Errorf("updating page %q: %w", pageName, err)
+		}
+		log.Printf("    Updated page %q (ID=%d)", page.Name, page.ID)
 	} else {
-		req.BookID = bookID
+		// Create the page with the raw content first so we have a page ID.
+		req := &bookstack.CreatePageRequest{
+			Name:     pageName,
+			Markdown: string(raw),
+		}
+		if chapterID > 0 {
+			req.ChapterID = chapterID
+		} else {
+			req.BookID = bookID
+		}
+		page, err = client.CreatePage(req)
+		if err != nil {
+			return fmt.Errorf("creating page %q: %w", pageName, err)
+		}
+		log.Printf("    Created page %q (ID=%d)", page.Name, page.ID)
 	}
-
-	page, err := client.CreatePage(req)
-	if err != nil {
-		return fmt.Errorf("creating page %q: %w", pageName, err)
-	}
-	log.Printf("    Created page %q (ID=%d)", page.Name, page.ID)
 
 	// Process images: upload local images as attachments and rewrite links.
 	processed, err := processImages(cfg, string(raw), mdPath, page.ID)
