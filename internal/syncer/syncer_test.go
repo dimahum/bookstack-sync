@@ -2,12 +2,15 @@ package syncer
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	bookstack "github.com/dimahum/bookstack-api"
 )
 
 func TestBuildExcludeSet(t *testing.T) {
@@ -221,6 +224,209 @@ func TestProcessImages_localImage(t *testing.T) {
 	}
 	if !strings.Contains(result, want) {
 		t.Errorf("expected result to contain %q\ngot: %s", want, result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helpers shared by newer tests
+// ---------------------------------------------------------------------------
+
+// writeJSON writes v as JSON to w and fails the test on error.
+func writeJSON(t *testing.T, w http.ResponseWriter, v interface{}) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Errorf("writeJSON: %v", err)
+	}
+}
+
+// newBSClient creates a bookstack.Client pointed at the given server URL.
+func newBSClient(t *testing.T, serverURL string) *bookstack.Client {
+	t.Helper()
+	return bookstack.NewClient(serverURL, "tid", "tsecret")
+}
+
+// bsBook is the minimal book summary used when building fake list responses.
+type bsBook struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// ---------------------------------------------------------------------------
+// findBookByName
+// ---------------------------------------------------------------------------
+
+// TestFindBookByName_found verifies that findBookByName returns the correct ID
+// when the server returns a book whose name matches.
+func TestFindBookByName_found(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/books" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(t, w, map[string]interface{}{
+			"data":  []bsBook{{ID: 7, Name: "my-book"}, {ID: 8, Name: "other"}},
+			"total": 2,
+		})
+	}))
+	defer ts.Close()
+
+	id, err := findBookByName(newBSClient(t, ts.URL), "my-book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 7 {
+		t.Errorf("got ID=%d, want 7", id)
+	}
+}
+
+// TestFindBookByName_notFound verifies that findBookByName returns 0 when no
+// book with the given name exists.
+func TestFindBookByName_notFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]interface{}{
+			"data":  []bsBook{{ID: 1, Name: "other-book"}},
+			"total": 1,
+		})
+	}))
+	defer ts.Close()
+
+	id, err := findBookByName(newBSClient(t, ts.URL), "my-book")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 0 {
+		t.Errorf("got ID=%d, want 0", id)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// syncPage – create vs update path
+// ---------------------------------------------------------------------------
+
+// TestSyncPage_update verifies that syncPage issues a PUT when an existing
+// page ID is provided (no images so no attachment upload is needed).
+func TestSyncPage_update(t *testing.T) {
+	const existingID = 55
+	var sawPUT bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := fmt.Sprintf("/api/pages/%d", existingID)
+		if r.Method == http.MethodPut && r.URL.Path == wantPath {
+			sawPUT = true
+			writeJSON(t, w, map[string]interface{}{"id": existingID, "name": "mypage"})
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	mdPath := filepath.Join(dir, "mypage.md")
+	writeFile(t, mdPath, "# My Page")
+
+	cfg := Config{URL: ts.URL, TokenID: "tid", TokenSecret: "tsecret"}
+	if err := syncPage(newBSClient(t, ts.URL), cfg, mdPath, 1, 0, existingID); err != nil {
+		t.Fatal(err)
+	}
+	if !sawPUT {
+		t.Error("expected a PUT request to update the existing page, but none was sent")
+	}
+}
+
+// TestSyncPage_create verifies that syncPage issues a POST when no existing
+// page ID is provided.
+func TestSyncPage_create(t *testing.T) {
+	var sawPOST bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/pages" {
+			sawPOST = true
+			writeJSON(t, w, map[string]interface{}{"id": 99, "name": "newpage"})
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	mdPath := filepath.Join(dir, "newpage.md")
+	writeFile(t, mdPath, "# New Page")
+
+	cfg := Config{URL: ts.URL, TokenID: "tid", TokenSecret: "tsecret"}
+	if err := syncPage(newBSClient(t, ts.URL), cfg, mdPath, 1, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !sawPOST {
+		t.Error("expected a POST request to create the page, but none was sent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// addBookToShelf idempotency
+// ---------------------------------------------------------------------------
+
+// TestAddBookToShelf_alreadyPresent verifies that addBookToShelf does NOT call
+// UpdateShelf when the book is already on the shelf.
+func TestAddBookToShelf_alreadyPresent(t *testing.T) {
+	var sawPUT bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/shelves/1":
+			writeJSON(t, w, map[string]interface{}{
+				"id":    1,
+				"name":  "s",
+				"books": []map[string]interface{}{{"id": 42}},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/shelves/1":
+			sawPUT = true
+			writeJSON(t, w, map[string]interface{}{"id": 1, "name": "s"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	if err := addBookToShelf(newBSClient(t, ts.URL), 1, 42); err != nil {
+		t.Fatal(err)
+	}
+	if sawPUT {
+		t.Error("expected no PUT when book is already on the shelf")
+	}
+}
+
+// TestAddBookToShelf_notPresent verifies that addBookToShelf calls UpdateShelf
+// to add the book when it is not yet on the shelf.
+func TestAddBookToShelf_notPresent(t *testing.T) {
+	var sawPUT bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/shelves/1":
+			writeJSON(t, w, map[string]interface{}{
+				"id":    1,
+				"name":  "s",
+				"books": []map[string]interface{}{{"id": 10}},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/shelves/1":
+			sawPUT = true
+			writeJSON(t, w, map[string]interface{}{"id": 1, "name": "s"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	if err := addBookToShelf(newBSClient(t, ts.URL), 1, 42); err != nil {
+		t.Fatal(err)
+	}
+	if !sawPUT {
+		t.Error("expected a PUT request to add the book to the shelf")
 	}
 }
 
