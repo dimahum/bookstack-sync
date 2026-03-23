@@ -139,12 +139,18 @@ func Run(cfg Config) error {
 			// Find or create the chapter.
 			var chapter *bookstack.ChapterDetail
 			if chapterID, exists := existingChapters[name]; exists {
-				chapter, err = client.UpdateChapter(chapterID, &bookstack.UpdateChapterRequest{
+				_, err = client.UpdateChapter(chapterID, &bookstack.UpdateChapterRequest{
 					BookID: book.ID,
 					Name:   name,
 				})
 				if err != nil {
 					return fmt.Errorf("updating chapter %q: %w", name, err)
+				}
+				// Re-read the chapter so that chapter.Pages is populated;
+				// UpdateChapter's PUT response does not include pages.
+				chapter, err = client.GetChapter(chapterID)
+				if err != nil {
+					return fmt.Errorf("reading chapter %q after update: %w", name, err)
 				}
 				log.Printf("  Updated chapter %q (ID=%d)", chapter.Name, chapter.ID)
 			} else {
