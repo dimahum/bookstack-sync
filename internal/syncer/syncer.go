@@ -295,8 +295,8 @@ func buildExcludeSet(excludes []string) map[string]bool {
 	return set
 }
 
-// listMdFiles returns the paths of all .md files directly inside dir,
-// skipping any names present in excludeSet.
+// listMdFiles returns the paths of all .md files inside dir (recursively),
+// skipping any file or directory names present in excludeSet.
 func listMdFiles(dir string, excludeSet map[string]bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -304,10 +304,15 @@ func listMdFiles(dir string, excludeSet map[string]bool) ([]string, error) {
 	}
 	var files []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if excludeSet[e.Name()] {
 			continue
 		}
-		if excludeSet[e.Name()] {
+		if e.IsDir() {
+			nested, err := listMdFiles(filepath.Join(dir, e.Name()), excludeSet)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, nested...)
 			continue
 		}
 		if strings.HasSuffix(e.Name(), ".md") {
