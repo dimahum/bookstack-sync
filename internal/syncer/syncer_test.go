@@ -39,7 +39,7 @@ func TestListMdFiles(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "notes.txt"), "plain text")
 	writeFile(t, filepath.Join(dir, "AGENTS.md"), "should be excluded")
 
-	// A subdirectory should be ignored.
+	// A subdirectory is traversed recursively.
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,12 +51,13 @@ func TestListMdFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("got %d files, want 2: %v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("got %d files, want 3: %v", len(got), got)
 	}
+	allowed := map[string]bool{"page1.md": true, "page2.md": true, "inner.md": true}
 	for _, f := range got {
 		base := filepath.Base(f)
-		if base != "page1.md" && base != "page2.md" {
+		if !allowed[base] {
 			t.Errorf("unexpected file in result: %s", f)
 		}
 	}
@@ -396,6 +397,69 @@ func TestAddBookToShelf_alreadyPresent(t *testing.T) {
 	}
 	if sawPUT {
 		t.Error("expected no PUT when book is already on the shelf")
+	}
+}
+
+// TestListMdFiles_nestedFiles verifies that listMdFiles discovers .md files in
+// deeply nested subdirectories (e.g. root/folder0/folder1/folder2/doc.md).
+func TestListMdFiles_nestedFiles(t *testing.T) {
+	root := t.TempDir()
+
+	// Create root/folder0/folder1/folder2/doc.md
+	deepDir := filepath.Join(root, "folder0", "folder1", "folder2")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(deepDir, "doc.md"), "# Deep Doc")
+	// Also a file at the root level.
+	writeFile(t, filepath.Join(root, "top.md"), "# Top")
+
+	got, err := listMdFiles(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("got %d files, want 2: %v", len(got), got)
+	}
+	found := map[string]bool{}
+	for _, f := range got {
+		found[filepath.Base(f)] = true
+	}
+	for _, want := range []string{"top.md", "doc.md"} {
+		if !found[want] {
+			t.Errorf("expected %q in results, but it was missing; got: %v", want, got)
+		}
+	}
+}
+
+// TestListMdFiles_excludeFolderAndNested verifies that when a directory name is
+// in the excludeSet, that directory and ALL its nested .md files are skipped.
+func TestListMdFiles_excludeFolderAndNested(t *testing.T) {
+	root := t.TempDir()
+
+	// Files that should be found.
+	writeFile(t, filepath.Join(root, "keep.md"), "# Keep")
+
+	// Excluded top-level directory with nested files.
+	excludedDir := filepath.Join(root, "drafts")
+	if err := os.MkdirAll(filepath.Join(excludedDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(excludedDir, "draft1.md"), "draft")
+	writeFile(t, filepath.Join(excludedDir, "sub", "draft2.md"), "nested draft")
+
+	excludes := buildExcludeSet([]string{"drafts"})
+	got, err := listMdFiles(root, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("got %d files, want 1: %v", len(got), got)
+	}
+	if filepath.Base(got[0]) != "keep.md" {
+		t.Errorf("expected keep.md, got %s", got[0])
 	}
 }
 
